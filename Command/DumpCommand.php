@@ -40,7 +40,7 @@ class DumpCommand extends ContainerAwareCommand
             ->setDescription('Dumps all assets to the filesystem')
             ->addArgument('write_to', InputArgument::OPTIONAL, 'Override the configured asset root')
             ->addOption('watch', null, InputOption::VALUE_NONE, 'Check for changes every second, debug mode only')
-            ->addOption('max-children', 'c', InputOption::VALUE_OPTIONAL, 'Maximum children processes to spawn (default '. $this->default_process_count() .')')
+            ->addOption('max-children', 'c', InputOption::VALUE_OPTIONAL, 'Maximum children processes to spawn (default '. ProcessManager::DEFAULT_CHILD_COUNT .')')
             ->addOption('force', null, InputOption::VALUE_NONE, 'Force an initial generation of all assets (used with --watch)')
             ->addOption('period', null, InputOption::VALUE_REQUIRED, 'Set the polling period in seconds (used with --watch)', 1)
         ;
@@ -50,9 +50,10 @@ class DumpCommand extends ContainerAwareCommand
     {
         $this->basePath = $input->getArgument('write_to') ?: $this->getContainer()->getParameter('assetic.write_to');
         $this->verbose = $input->getOption('verbose');
-        $this->max_children = $input->getOption('max-children') ? $input->getOption('max-children') : $this->default_process_count();
         $this->am = $this->getContainer()->get('assetic.asset_manager');
-        $this->process_manager = new ProcessManager();
+
+        $max_children = $input->getOption('max-children') ? $input->getOption('max-children') : ProcessManager::DEFAULT_CHILD_COUNT;
+        $this->process_manager = new ProcessManager($max_children);
     }
 
     protected function execute(InputInterface $input, OutputInterface $output)
@@ -66,17 +67,12 @@ class DumpCommand extends ContainerAwareCommand
                 $this->dumpAsset($name, $output);
             }
 
-            $this->process_manager->run($this->max_children);
+            $this->process_manager->run();
         } elseif (!$this->am->isDebug()) {
             throw new \RuntimeException('The --watch option is only available in debug mode.');
         } else {
             $this->watch($input, $output);
         }
-    }
-
-    private function default_process_count()
-    {
-        return ProcessManager::DEFAULT_CHILD_COUNT;
     }
 
     /**
@@ -125,7 +121,7 @@ class DumpCommand extends ContainerAwareCommand
             }
 
             $start_time = time();
-            $this->process_manager->run($this->max_children);
+            $this->process_manager->run();
             $end_time = time();
 
             // Skip sleeping if we've already exceeded our period time

@@ -26,7 +26,7 @@ abstract class AbstractProcessManager {
     public function __construct($max_children = self::DEFAULT_CHILD_COUNT)
     {
         $this->queue = array();
-        $this->max_children =
+        $this->max_children = $max_children > 0 ? $max_children : DEFAULT_CHILD_COUNT;
     }
 
     /**
@@ -62,10 +62,10 @@ class EqualQueueWorkers extends AbstractProcessManager {
      *
      * @param Integer $max_children
      */
-    public function run($max_children = self::DEFAULT_CHILD_COUNT)
+    public function run()
     {
         $children        = array();
-        $jobs_per_bucket = abs(intval( ceil(count($this->queue) / ($max_children > 0 ? $max_children : 1)) ));
+        $jobs_per_bucket = abs(intval(ceil(count($this->queue) / $this->max_children)));
         $work_chunks     = array_chunk($this->queue, $jobs_per_bucket);
 
         $this->queue = array();
