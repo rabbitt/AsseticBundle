@@ -19,11 +19,13 @@ use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Bundle\AsseticBundle\EqualQueueWorkers as ProcessManager;
 
 /**
  * Dumps assets to the filesystem.
  *
  * @author Kris Wallsmith <kris@symfony.com>
+ * @author Carl P. Corliss <rabbitt@gmail.com>
  */
 class DumpCommand extends ContainerAwareCommand
 {
@@ -38,6 +40,7 @@ class DumpCommand extends ContainerAwareCommand
             ->setDescription('Dumps all assets to the filesystem')
             ->addArgument('write_to', InputArgument::OPTIONAL, 'Override the configured asset root')
             ->addOption('watch', null, InputOption::VALUE_NONE, 'Check for changes every second, debug mode only')
+            ->addOption('max-children', 'c', InputOption::VALUE_OPTIONAL, 'Maximum children processes to spawn (default '. $this->default_process_count() .')')
             ->addOption('force', null, InputOption::VALUE_NONE, 'Force an initial generation of all assets (used with --watch)')
             ->addOption('period', null, InputOption::VALUE_REQUIRED, 'Set the polling period in seconds (used with --watch)', 1)
         ;
@@ -47,7 +50,9 @@ class DumpCommand extends ContainerAwareCommand
     {
         $this->basePath = $input->getArgument('write_to') ?: $this->getContainer()->getParameter('assetic.write_to');
         $this->verbose = $input->getOption('verbose');
+        $this->max_children = $input->getOption('max-children') ? $input->getOption('max-children') : $this->default_process_count();
         $this->am = $this->getContainer()->get('assetic.asset_manager');
+        $this->process_manager = new ProcessManager();
     }
 
     protected function execute(InputInterface $input, OutputInterface $output)
@@ -60,11 +65,18 @@ class DumpCommand extends ContainerAwareCommand
             foreach ($this->am->getNames() as $name) {
                 $this->dumpAsset($name, $output);
             }
+
+            $this->process_manager->run($this->max_children);
         } elseif (!$this->am->isDebug()) {
             throw new \RuntimeException('The --watch option is only available in debug mode.');
         } else {
             $this->watch($input, $output);
         }
+    }
+
+    private function default_process_count()
+    {
+        return ProcessManager::DEFAULT_CHILD_COUNT;
     }
 
     /**
@@ -89,6 +101,8 @@ class DumpCommand extends ContainerAwareCommand
         }
 
         $error = '';
+        $period = intval($input->getOption('period'));
+
         while (true) {
             try {
                 foreach ($this->am->getNames() as $name) {
@@ -110,7 +124,14 @@ class DumpCommand extends ContainerAwareCommand
                 }
             }
 
-            sleep($input->getOption('period'));
+            $start_time = time();
+            $this->process_manager->run($this->max_children);
+            $end_time = time();
+
+            // Skip sleeping if we've already exceeded our period time
+            if (($end_time - $start_time) < $period) {
+                sleep($period - ($end_time - $start_time));
+            }
         }
     }
 
@@ -179,50 +200,57 @@ class DumpCommand extends ContainerAwareCommand
      */
     private function doDump(AssetInterface $asset, OutputInterface $output)
     {
-        foreach ($this->getAssetVarCombinations($asset) as $combination) {
-            $asset->setValues($combination);
 
-            // resolve the target path
-            $target = rtrim($this->basePath, '/').'/'.$asset->getTargetPath();
-            $target = str_replace('_controller/', '', $target);
-            $target = VarUtils::resolve($target, $asset->getVars(), $asset->getValues());
+        $basePath     = $this->basePath;
+        $verbose      = $this->verbose;
+        $combinations = $this->getAssetVarCombinations($asset);
 
-            if (!is_dir($dir = dirname($target))) {
+        $this->process_manager->enqueue(function() use($asset, $output, $basePath, $verbose, $combinations) {
+            foreach ($combinations as $combination) {
+                $asset->setValues($combination);
+
+                // resolve the target path
+                $target = rtrim($basePath, '/').'/'.$asset->getTargetPath();
+                $target = str_replace('_controller/', '', $target);
+                $target = VarUtils::resolve($target, $asset->getVars(), $asset->getValues());
+
+                if (!is_dir($dir = dirname($target))) {
+                    $output->writeln(sprintf(
+                        '<comment>%s</comment> <info>[dir+]</info> %s',
+                        date('H:i:s'),
+                        $dir
+                    ));
+
+                    if (false === @mkdir($dir, 0777, true)) {
+                        throw new \RuntimeException('Unable to create directory '.$dir);
+                    }
+                }
+
                 $output->writeln(sprintf(
-                    '<comment>%s</comment> <info>[dir+]</info> %s',
+                    '<comment>%s</comment> <info>[file+]</info> %s',
                     date('H:i:s'),
-                    $dir
+                    $target
                 ));
 
-                if (false === @mkdir($dir, 0777, true)) {
-                    throw new \RuntimeException('Unable to create directory '.$dir);
-                }
-            }
-
-            $output->writeln(sprintf(
-                '<comment>%s</comment> <info>[file+]</info> %s',
-                date('H:i:s'),
-                $target
-            ));
-
-            if ($this->verbose) {
-                if ($asset instanceof AssetCollectionInterface) {
-                    foreach ($asset as $leaf) {
-                        $root = $leaf->getSourceRoot();
-                        $path = $leaf->getSourcePath();
+                if ($verbose) {
+                    if ($asset instanceof AssetCollectionInterface) {
+                        foreach ($asset as $leaf) {
+                            $root = $leaf->getSourceRoot();
+                            $path = $leaf->getSourcePath();
+                            $output->writeln(sprintf('        <comment>%s/%s</comment>', $root ?: '[unknown root]', $path ?: '[unknown path]'));
+                        }
+                    } else {
+                        $root = $asset->getSourceRoot();
+                        $path = $asset->getSourcePath();
                         $output->writeln(sprintf('        <comment>%s/%s</comment>', $root ?: '[unknown root]', $path ?: '[unknown path]'));
                     }
-                } else {
-                    $root = $asset->getSourceRoot();
-                    $path = $asset->getSourcePath();
-                    $output->writeln(sprintf('        <comment>%s/%s</comment>', $root ?: '[unknown root]', $path ?: '[unknown path]'));
+                }
+
+                if (false === @file_put_contents($target, $asset->dump())) {
+                    throw new \RuntimeException('Unable to write file '.$target);
                 }
             }
-
-            if (false === @file_put_contents($target, $asset->dump())) {
-                throw new \RuntimeException('Unable to write file '.$target);
-            }
-        }
+        })
     }
 
     private function getAssetVarCombinations(AssetInterface $asset)
